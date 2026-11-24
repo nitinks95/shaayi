@@ -13,6 +13,7 @@ mod pointer_mac;
 #[cfg(target_os = "windows")]
 mod windows_input;
 mod phone_trackpad;
+mod first_launch;
 #[allow(dead_code)]
 mod normalise;
 
@@ -86,6 +87,21 @@ fn stop_phone_sharing(state: State<'_, phone_trackpad::PhoneTrackpadServer>) {
     state.stop();
 }
 
+/// Records that the user accepted the terms (marker file in the app config directory).
+#[tauri::command]
+fn accept_terms(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    first_launch::accept_in(&dir)
+}
+
+#[tauri::command]
+fn has_accepted_terms(app: tauri::AppHandle) -> bool {
+    app.path()
+        .app_config_dir()
+        .map(|dir| first_launch::has_accepted_in(&dir))
+        .unwrap_or(false)
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .setup(|app| {
@@ -101,7 +117,7 @@ fn main() {
             app.manage(phone_server);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![set_edit_mode, get_input_status, native_status, set_edit_box, get_phone_pairing, stop_phone_sharing])
+        .invoke_handler(tauri::generate_handler![set_edit_mode, get_input_status, native_status, set_edit_box, get_phone_pairing, stop_phone_sharing, accept_terms, has_accepted_terms])
         .on_window_event(|_window, event| {
             #[cfg(target_os = "windows")]
             if matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }) {

@@ -4,6 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Shaayi M0 spike</title>
+  <script>
+    // First run only: show the terms page before the canvas.
+    if (window.__TAURI__) {
+      window.__TAURI__.core.invoke('has_accepted_terms').then((ok) => {
+        if (!ok) window.location.replace('first-launch.html');
+      }).catch(() => {});
+    }
+  </script>
   <style>
     :root { --bg: #fafafa; --ink: #111; --panel: #ffffffee; --muted: #666; }
     @media (prefers-color-scheme: dark) {

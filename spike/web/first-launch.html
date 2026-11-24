@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Welcome to Shaayi</title>
+  <style>
+    :root { --bg: #fafafa; --ink: #111; --muted: #666; --accent: #e87524; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #161616; --ink: #f2f2f2; --muted: #aaa; } }
+    body { margin: 0; background: var(--bg); color: var(--ink);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 640px; margin: 0 auto; padding: 32px 24px; }
+    h1 { font-size: 22px; } h2 { font-size: 16px; margin-top: 28px; }
+    li { margin: 6px 0; } .muted { color: var(--muted); }
+    button { margin-top: 24px; padding: 10px 20px; font: inherit; border: 0; border-radius: 8px;
+      background: var(--accent); color: #fff; cursor: pointer; }
+    button:disabled { opacity: .5; cursor: default; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Welcome to Shaayi</h1>
+  <h2>Terms and conditions</h2>
+  <p>Shaayi is an early preview. It is provided as is, without warranty. It reads your trackpad,
+     and optionally a paired phone on your local network, only to draw on its canvas. Nothing you
+     draw or any input data leaves your computer.</p>
+  <h2>Permissions checklist</h2>
+  <ul>
+    <li><strong>macOS:</strong> no extra permission is needed for the input paths that ship today.</li>
+    <li><strong>Windows:</strong> no extra permission is needed for the input paths that ship today.</li>
+  </ul>
+  <p class="muted">If a future input source needs a permission, this page will say so and link to
+     the relevant system settings then.</p>
+  <label><input type="checkbox" id="agree" /> I have read and accept the terms.</label><br />
+  <button id="accept" disabled>Continue</button>
+  <p id="error" class="muted" role="alert"></p>
+</main>
+<script src="first-launch.js"></script>
+</body>
+</html>
