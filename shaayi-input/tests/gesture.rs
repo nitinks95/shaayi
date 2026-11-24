@@ -56,3 +56,31 @@ fn reset_ends_session_and_clears_state() {
     g.reset();
     assert!(g.handle(ev(1, Phase::Move, 0.3, 0.2, 10.0)).is_empty());
 }
+
+#[test]
+fn unchanged_move_emits_nothing_and_keeps_tap() {
+    let mut g = GestureMachine::new();
+    g.handle(ev(1, Phase::Down, 0.5, 0.5, 0.0));
+    // Windows reports a Move per HID report while a finger rests.
+    assert!(g.handle(ev(1, Phase::Move, 0.5, 0.5, 8.0)).is_empty());
+    assert!(g.handle(ev(1, Phase::Move, 0.5002, 0.5001, 16.0)).is_empty());
+    let ops = g.handle(ev(1, Phase::Up, 0.5, 0.5, 24.0));
+    assert!(matches!(ops.as_slice(), [InkOp::Dot { .. }]));
+}
+
+#[test]
+fn tap_down_up_same_point_emits_dot() {
+    let mut g = GestureMachine::new();
+    assert!(g.handle(ev(1, Phase::Down, 0.3, 0.7, 0.0)).is_empty());
+    let ops = g.handle(ev(1, Phase::Up, 0.3, 0.7, 50.0));
+    assert_eq!(ops, vec![InkOp::Dot { at: (0.3, 0.7) }]);
+}
+
+#[test]
+fn sub_slop_moves_accumulate_into_a_segment() {
+    let mut g = GestureMachine::new();
+    g.handle(ev(1, Phase::Down, 0.5, 0.5, 0.0));
+    assert!(g.handle(ev(1, Phase::Move, 0.5003, 0.5, 8.0)).is_empty());
+    let ops = g.handle(ev(1, Phase::Move, 0.5006, 0.5, 16.0));
+    assert_eq!(ops, vec![InkOp::Segment { from: (0.5, 0.5), to: (0.5006, 0.5) }]);
+}

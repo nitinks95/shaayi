@@ -68,3 +68,28 @@ fn degenerate_canvas_does_not_panic() {
     assert_eq!(b.width, 320.0);
     b.clamp_to(-5.0, 100.0);
 }
+
+#[test]
+fn unset_box_maps_no_ops() {
+    use shaayi_input::InkOp;
+    let unset = EditBox { anchor: (0.0, 0.0), width: 0.0 };
+    assert!(!unset.is_set());
+    assert_eq!(unset.map_op(&InkOp::Dot { at: (0.5, 0.5) }), None);
+    assert_eq!(unset.map_op(&InkOp::Segment { from: (0.0, 0.0), to: (1.0, 1.0) }), None);
+    assert_eq!(unset.map_op(&InkOp::Rollback { segments: 2 }), None);
+    let nan = EditBox { anchor: (10.0, 10.0), width: f64::NAN };
+    assert!(!nan.is_set());
+}
+
+#[test]
+fn set_box_maps_ops_to_canvas() {
+    use shaayi_input::InkOp;
+    let b = EditBox { anchor: (200.0, 100.0), width: 160.0 };
+    assert!(b.is_set());
+    assert_eq!(b.map_op(&InkOp::Dot { at: (0.5, 0.5) }), Some(InkOp::Dot { at: (200.0, 100.0) }));
+    assert_eq!(
+        b.map_op(&InkOp::Segment { from: (0.0, 0.0), to: (1.0, 1.0) }),
+        Some(InkOp::Segment { from: (120.0, 50.0), to: (280.0, 150.0) })
+    );
+    assert_eq!(b.map_op(&InkOp::Rollback { segments: 3 }), Some(InkOp::Rollback { segments: 3 }));
+}

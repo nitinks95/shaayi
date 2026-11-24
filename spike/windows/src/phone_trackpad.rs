@@ -335,7 +335,9 @@ fn route_through_gestures(state: &ServerState, phase: &str, id: u64, x: f64, y: 
 fn emit_ink_ops(state: &ServerState, ops: &[InkOp]) {
     if ops.is_empty() { return; }
     let Some(edit) = current_edit_box() else { return; };
-    let json: Vec<serde_json::Value> = ops.iter().map(|op| native_ink_op_json(op, &edit)).collect();
+    // Dropped until JS has placed the edit box (width 0 = unset).
+    let json: Vec<serde_json::Value> = ops.iter().filter_map(|op| native_ink_op_json(op, &edit)).collect();
+    if json.is_empty() { return; }
     let _ = state.app.emit("ink-ops", json);
 }
 
@@ -350,9 +352,9 @@ fn current_edit_box() -> Option<EditBox> { native::current_edit_box() }
 fn current_edit_box() -> Option<EditBox> { None }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn native_ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value { native::ink_op_json(op, edit) }
+fn native_ink_op_json(op: &InkOp, edit: &EditBox) -> Option<serde_json::Value> { native::ink_op_json(op, edit) }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn native_ink_op_json(_op: &InkOp, _edit: &EditBox) -> serde_json::Value { serde_json::Value::Null }
+fn native_ink_op_json(_op: &InkOp, _edit: &EditBox) -> Option<serde_json::Value> { None }
 
 struct PhoneConnection(Arc<ServerState>);
 

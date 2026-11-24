@@ -2,6 +2,9 @@ use crate::event::{ContactEvent, InkOp, Phase};
 use std::collections::HashMap;
 
 const ROLLBACK_WINDOW_MS: f64 = 150.0;
+/// A Move closer than this (normalised units) to the last point is not movement.
+/// Windows sends a report per frame while a finger rests; those must not draw.
+pub const MOVE_SLOP: f64 = 0.0005;
 
 struct Contact {
     last: (f64, f64),
@@ -57,6 +60,11 @@ impl GestureMachine {
                     return Vec::new();
                 };
                 let from = c.last;
+                if (p.0 - from.0).hypot(p.1 - from.1) <= MOVE_SLOP {
+                    // Unchanged position: no segment, not counted as movement.
+                    // `last` is kept so slow drags still accumulate past the slop.
+                    return Vec::new();
+                }
                 c.last = p;
                 c.moved = true;
                 if suppressed {

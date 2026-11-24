@@ -8,7 +8,7 @@ use std::{
     ffi::c_void,
     mem::{size_of, zeroed},
     ptr,
-    sync::{mpsc, Mutex, OnceLock},
+    sync::{atomic::{AtomicBool, Ordering}, mpsc, Mutex, OnceLock},
     thread,
     time::Instant,
 };
@@ -45,6 +45,9 @@ static GESTURES: OnceLock<Mutex<GestureMachine>> = OnceLock::new();
 static EDIT_BOX: OnceLock<Mutex<EditBox>> = OnceLock::new();
 static START: OnceLock<Instant> = OnceLock::new();
 static STATUS: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
+/// Logical edit-mode flag. Without a Precision Touchpad the cursor is not
+/// clipped (the mouse fallback needs it), so this, not the pointer lock, gates ink.
+static EDIT_MODE: AtomicBool = AtomicBool::new(false);
 static ACTIVE_CONTACTS: OnceLock<Mutex<HashMap<usize, HashMap<u32, (f64, f64)>>>> = OnceLock::new();
 
 #[repr(C)]
@@ -159,9 +162,9 @@ fn edit_box() -> &'static Mutex<EditBox> {
     EDIT_BOX.get_or_init(|| Mutex::new(EditBox { anchor: (0.0, 0.0), width: 0.0 }))
 }
 
-/// True while edit mode holds the pointer (ink draws only then).
+/// True while edit mode is on (ink draws only then).
 pub fn edit_mode_on() -> bool {
-    pointer().lock().map(|p| p.is_detached()).unwrap_or(false)
+    EDIT_MODE.load(Ordering::SeqCst)
 }
 
 /// Snapshot of the current edit box, for the phone adapter.
@@ -192,17 +195,25 @@ pub fn status() -> String {
         .unwrap_or_else(|_| "Native input status unavailable".into())
 }
 
+/// Enter or leave edit mode. Entering clips the cursor only when a Precision
+/// Touchpad is present; otherwise the cursor stays free for the mouse fallback.
+/// Leaving always releases (a no-op when nothing was clipped).
 pub fn set_edit_mode(enabled: bool) -> Result<(), String> {
     let mut lock = pointer().lock().map_err(|_| "Pointer lock is unavailable")?;
+    // Start and end every edit session with clean gesture state.
+    if let Ok(mut g) = gestures().lock() {
+        g.reset();
+    }
+    crate::phone_trackpad::reset_phone_gestures();
     if enabled {
-        lock.enter_edit()
-    } else {
-        let result = lock.exit_edit();
-        if let Ok(mut g) = gestures().lock() {
-            g.reset();
+        if has_precision_touchpad() {
+            lock.enter_edit()?;
         }
-        crate::phone_trackpad::reset_phone_gestures();
-        result
+        EDIT_MODE.store(true, Ordering::SeqCst);
+        Ok(())
+    } else {
+        EDIT_MODE.store(false, Ordering::SeqCst);
+        lock.exit_edit()
     }
 }
 
@@ -408,8 +419,8 @@ fn emit_contact_changes(device: usize, current: Vec<DecodedContact>) {
 
 /// The only path from a touchpad contact to ink: through `GestureMachine`.
 fn handle_contact(id: u32, phase: Phase, x: f64, y: f64) {
-    // Contacts only draw while edit mode holds the pointer.
-    if !pointer().lock().map(|p| p.is_detached()).unwrap_or(false) { return; }
+    // Contacts only draw while edit mode is on.
+    if !edit_mode_on() { return; }
     let at_ms = START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
     let event = ContactEvent { source: Source::Trackpad, id: id as u64, phase, x, y, at_ms };
     let ops = match gestures().lock() {
@@ -418,24 +429,23 @@ fn handle_contact(id: u32, phase: Phase, x: f64, y: f64) {
     };
     if ops.is_empty() { return; }
     let Ok(edit) = edit_box().lock().map(|b| *b) else { return; };
-    let json: Vec<serde_json::Value> = ops.iter().map(|op| ink_op_json(op, &edit)).collect();
+    // Contacts are dropped until JS has placed the edit box (width 0 = unset).
+    let json: Vec<serde_json::Value> = ops.iter().filter_map(|op| ink_op_json(op, &edit)).collect();
+    if json.is_empty() { return; }
     if let Some(tx) = REPORTS.get() {
         let _ = tx.send(serde_json::json!({ "ink-ops": json }));
     }
 }
 
-pub fn ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value {
-    match op {
-        InkOp::Segment { from, to } => {
-            let (f, t) = (edit.map(from.0, from.1), edit.map(to.0, to.1));
+/// Map an op into the edit box; `None` while the box is not set (width 0).
+pub fn ink_op_json(op: &InkOp, edit: &EditBox) -> Option<serde_json::Value> {
+    Some(match edit.map_op(op)? {
+        InkOp::Segment { from: f, to: t } => {
             serde_json::json!({ "op": "segment", "from": [f.0, f.1], "to": [t.0, t.1] })
         }
-        InkOp::Dot { at } => {
-            let a = edit.map(at.0, at.1);
-            serde_json::json!({ "op": "dot", "at": [a.0, a.1] })
-        }
+        InkOp::Dot { at: a } => serde_json::json!({ "op": "dot", "at": [a.0, a.1] }),
         InkOp::Rollback { segments } => serde_json::json!({ "op": "rollback", "segments": segments }),
-    }
+    })
 }
 
 #[repr(C)]

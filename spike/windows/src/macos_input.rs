@@ -91,7 +91,9 @@ impl TouchOverlay {
         }
         let touches = e.touchesMatchingPhase_inView(ns_phase, Some(self));
         for t in touches.iter() {
-            if t.isResting() { continue; }
+            // Skip resting touches for Down/Move, but always forward Ended and
+            // Cancelled so a touch that became resting still closes its contact.
+            if t.isResting() && matches!(phase, Phase::Down | Phase::Move) { continue; }
             let ident = t.identity();
             let id: usize = unsafe { msg_send![&*ident, hash] };
             let id = id as u64;
@@ -119,24 +121,23 @@ fn handle_contact(id: u64, phase: Phase, x: f64, y: f64) {
     };
     if ops.is_empty() { return; }
     let Ok(edit) = edit_box().lock().map(|b| *b) else { return; };
-    let json: Vec<serde_json::Value> = ops.iter().map(|op| ink_op_json(op, &edit)).collect();
+    // Contacts are dropped until JS has placed the edit box (width 0 = unset).
+    let json: Vec<serde_json::Value> = ops.iter().filter_map(|op| ink_op_json(op, &edit)).collect();
+    if json.is_empty() { return; }
     if let Some(app) = APP.get() {
         let _ = app.emit("ink-ops", json);
     }
 }
 
-pub fn ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value {
-    match op {
-        InkOp::Segment { from, to } => {
-            let (f, t) = (edit.map(from.0, from.1), edit.map(to.0, to.1));
+/// Map an op into the edit box; `None` while the box is not set (width 0).
+pub fn ink_op_json(op: &InkOp, edit: &EditBox) -> Option<serde_json::Value> {
+    Some(match edit.map_op(op)? {
+        InkOp::Segment { from: f, to: t } => {
             serde_json::json!({ "op": "segment", "from": [f.0, f.1], "to": [t.0, t.1] })
         }
-        InkOp::Dot { at } => {
-            let a = edit.map(at.0, at.1);
-            serde_json::json!({ "op": "dot", "at": [a.0, a.1] })
-        }
+        InkOp::Dot { at: a } => serde_json::json!({ "op": "dot", "at": [a.0, a.1] }),
         InkOp::Rollback { segments } => serde_json::json!({ "op": "rollback", "segments": segments }),
-    }
+    })
 }
 
 /// Install the overlay on the main window and clear any stale pointer detach
@@ -197,6 +198,11 @@ pub fn set_edit_mode(enabled: bool) -> Result<(), String> {
     if enabled {
         lock.enter_edit()?;
         drop(lock);
+        // Start every edit session with clean gesture state.
+        if let Ok(mut g) = gestures().lock() {
+            g.reset();
+        }
+        crate::phone_trackpad::reset_phone_gestures();
         if let Some((view, window)) = overlay_and_window() {
             *view.ivars().previous.lock().map_err(|_| "poisoned")? = window.firstResponder();
             window.makeFirstResponder(Some(view));

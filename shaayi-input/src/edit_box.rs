@@ -1,6 +1,8 @@
 //! Edit box: a fixed-aspect rectangle on the canvas that surface contact
 //! coordinates (normalised 0-1) are mapped into.
 
+use crate::event::InkOp;
+
 pub const ASPECT: f64 = 1.6;
 
 /// Box centred on `anchor`, `width` wide, in canvas pixels.
@@ -41,6 +43,24 @@ impl EditBox {
     pub fn map(&self, x: f64, y: f64) -> (f64, f64) {
         let (x0, y0) = self.origin();
         (x0 + x * self.width, y0 + y * self.height())
+    }
+
+    /// False until a real box has been placed (the default box has width 0).
+    pub fn is_set(&self) -> bool {
+        self.width.is_finite() && self.width > 0.0 && self.anchor.0.is_finite() && self.anchor.1.is_finite()
+    }
+
+    /// Map an ink op into canvas pixels. Returns `None` while the box is not
+    /// set, so no contact is ever drawn through the default zero-width box.
+    pub fn map_op(&self, op: &InkOp) -> Option<InkOp> {
+        if !self.is_set() {
+            return None;
+        }
+        Some(match op {
+            InkOp::Segment { from, to } => InkOp::Segment { from: self.map(from.0, from.1), to: self.map(to.0, to.1) },
+            InkOp::Dot { at } => InkOp::Dot { at: self.map(at.0, at.1) },
+            InkOp::Rollback { segments } => InkOp::Rollback { segments: *segments },
+        })
     }
 
     pub fn contains(&self, p: (f64, f64)) -> bool {
