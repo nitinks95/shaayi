@@ -4,7 +4,7 @@ use std::collections::HashMap;
 const ROLLBACK_WINDOW_MS: f64 = 150.0;
 /// A Move closer than this (normalised units) to the last point is not movement.
 /// Windows sends a report per frame while a finger rests; those must not draw.
-pub const MOVE_SLOP: f64 = 0.0005;
+pub const MOVE_SLOP: f64 = 0.003;
 
 struct Contact {
     last: (f64, f64),
