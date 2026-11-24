@@ -6,7 +6,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -24,6 +24,16 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
+
+use shaayi_input::{
+    phone::{link_state, LinkState},
+    ContactEvent, EditBox, GestureMachine, InkOp, Phase, Source,
+};
+
+#[cfg(target_os = "macos")]
+use crate::macos_input as native;
+#[cfg(target_os = "windows")]
+use crate::windows_input as native;
 
 const PHONE_PAGE: &str = include_str!("../../web/phone.html");
 const PHONE_SCRIPT: &str = include_str!("../../web/phone.js");
@@ -44,6 +54,8 @@ struct ServerState {
     connected: AtomicBool,
     shutdown: watch::Sender<bool>,
     disconnect: broadcast::Sender<()>,
+    gestures: std::sync::Mutex<GestureMachine>,
+    started: Instant,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,6 +103,8 @@ impl PhoneTrackpadServer {
             connected: AtomicBool::new(false),
             shutdown,
             disconnect,
+            gestures: std::sync::Mutex::new(GestureMachine::new()),
+            started: Instant::now(),
         });
 
         let routes = Router::new()
@@ -222,11 +236,16 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<ServerState>) {
     }
     emit_status(&state, true, "Phone connected");
 
+    let mut last_seen_ms = state.now_ms();
     loop {
         tokio::select! {
-            incoming = tokio::time::timeout(Duration::from_secs(4), socket.recv()) => {
+            incoming = tokio::time::timeout(Duration::from_millis(500), socket.recv()) => {
                 // No frame for 4 s (phone heartbeat is every 1.5 s): treat the link as dead and free the slot.
-                let Ok(incoming) = incoming else { break; };
+                let Ok(incoming) = incoming else {
+                    if link_state(last_seen_ms, state.now_ms()) == LinkState::Dead { break; }
+                    continue;
+                };
+                last_seen_ms = state.now_ms();
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         if text.as_str() == r#"{"type":"ping"}"# { continue; }
@@ -273,8 +292,48 @@ fn forward_pointer(state: &ServerState, message: ClientMessage) -> bool {
     }
     if !matches!(phase.as_str(), "down" | "move" | "up" | "cancel") { return false; }
     let _ = state.app.emit("phone-input", serde_json::json!({ "phase": phase, "id": id, "x": x, "y": y }));
+    route_through_gestures(state, &phase, id, x, y);
     true
 }
+
+impl ServerState {
+    fn now_ms(&self) -> f64 {
+        self.started.elapsed().as_secs_f64() * 1000.0
+    }
+}
+
+/// Phone contacts become ink the same way trackpad contacts do: through `GestureMachine`.
+fn route_through_gestures(state: &ServerState, phase: &str, id: u64, x: f64, y: f64) {
+    let phase = match phase {
+        "down" => Phase::Down,
+        "move" => Phase::Move,
+        "up" => Phase::Up,
+        _ => Phase::Cancel,
+    };
+    let event = ContactEvent { source: Source::Phone, id, phase, x, y, at_ms: state.now_ms() };
+    let ops = match state.gestures.lock() {
+        Ok(mut g) => g.handle(event),
+        Err(_) => return,
+    };
+    emit_ink_ops(state, &ops);
+}
+
+fn emit_ink_ops(state: &ServerState, ops: &[InkOp]) {
+    if ops.is_empty() { return; }
+    let Some(edit) = current_edit_box() else { return; };
+    let json: Vec<serde_json::Value> = ops.iter().map(|op| native_ink_op_json(op, &edit)).collect();
+    let _ = state.app.emit("ink-ops", json);
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn current_edit_box() -> Option<EditBox> { native::current_edit_box() }
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn current_edit_box() -> Option<EditBox> { None }
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn native_ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value { native::ink_op_json(op, edit) }
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn native_ink_op_json(_op: &InkOp, _edit: &EditBox) -> serde_json::Value { serde_json::Value::Null }
 
 struct PhoneConnection(Arc<ServerState>);
 
@@ -285,6 +344,7 @@ impl PhoneConnection {
 impl Drop for PhoneConnection {
     fn drop(&mut self) {
         self.0.connected.store(false, Ordering::SeqCst);
+        if let Ok(mut g) = self.0.gestures.lock() { let _ = g.reset(); }
         let message = if self.0.stopped.load(Ordering::SeqCst) { "Sharing stopped" } else { "Phone disconnected" };
         emit_status(&self.0, false, message);
         let _ = self.0.app.emit("phone-input-cleared", ());

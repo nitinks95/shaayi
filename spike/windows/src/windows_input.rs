@@ -159,6 +159,11 @@ fn edit_box() -> &'static Mutex<EditBox> {
     EDIT_BOX.get_or_init(|| Mutex::new(EditBox { anchor: (0.0, 0.0), width: 0.0 }))
 }
 
+/// Snapshot of the current edit box, for the phone adapter.
+pub fn current_edit_box() -> Option<EditBox> {
+    edit_box().lock().ok().map(|b| *b)
+}
+
 /// Place the edit box (canvas pixels) and clamp it inside the canvas.
 pub fn set_edit_box(anchor_x: f64, anchor_y: f64, width: f64, canvas_w: f64, canvas_h: f64) {
     if let Ok(mut b) = edit_box().lock() {
@@ -413,7 +418,7 @@ fn handle_contact(id: u32, phase: Phase, x: f64, y: f64) {
     }
 }
 
-fn ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value {
+pub fn ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value {
     match op {
         InkOp::Segment { from, to } => {
             let (f, t) = (edit.map(from.0, from.1), edit.map(to.0, to.1));

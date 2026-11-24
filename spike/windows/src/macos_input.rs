@@ -125,7 +125,7 @@ fn handle_contact(id: u64, phase: Phase, x: f64, y: f64) {
     }
 }
 
-fn ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value {
+pub fn ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value {
     match op {
         InkOp::Segment { from, to } => {
             let (f, t) = (edit.map(from.0, from.1), edit.map(to.0, to.1));
@@ -170,6 +170,11 @@ fn overlay_and_window() -> Option<(&'static TouchOverlay, Retained<NSWindow>)> {
 
 pub fn native_status() -> String {
     "Trackpad (NSTouch) active".into()
+}
+
+/// Snapshot of the current edit box, for the phone adapter.
+pub fn current_edit_box() -> Option<EditBox> {
+    edit_box().lock().ok().map(|b| *b)
 }
 
 /// Place the edit box (canvas pixels) and clamp it inside the canvas.
