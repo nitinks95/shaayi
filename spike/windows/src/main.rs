@@ -9,6 +9,8 @@ mod pointer_win;
 #[cfg(target_os = "windows")]
 mod windows_input;
 mod phone_trackpad;
+#[allow(dead_code)]
+mod normalise;
 
 #[tauri::command]
 fn set_edit_mode(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
@@ -66,7 +68,7 @@ fn stop_phone_sharing(state: State<'_, phone_trackpad::PhoneTrackpadServer>) {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             #[cfg(target_os = "windows")]
             windows_input::start(app.handle().clone())?;
@@ -78,9 +80,11 @@ fn main() {
         .on_window_event(|_window, event| {
             #[cfg(target_os = "windows")]
             if matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }) {
-                let _ = windows_input::set_edit_mode(false);
                 use tauri::Emitter;
-                let _ = _window.app_handle().emit("edit-mode-changed", false);
+                match windows_input::set_edit_mode(false) {
+                    Ok(()) => { let _ = _window.app_handle().emit("edit-mode-changed", false); }
+                    Err(e) => eprintln!("Failed to release pointer: {e}"),
+                }
             }
             if let Some(phone) = _window.app_handle().try_state::<phone_trackpad::PhoneTrackpadServer>() {
                 match event {
@@ -90,6 +94,14 @@ fn main() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Shaayi M0 spike");
+        .build(tauri::generate_context!())
+        .expect("error while building Shaayi M0 spike");
+    app.run(|_app, event| {
+        #[cfg(target_os = "windows")]
+        if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+            let _ = windows_input::set_edit_mode(false);
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = event;
+    });
 }
