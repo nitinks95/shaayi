@@ -3248,6 +3248,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shaayi-input"
+version = "0.1.0"
+
+[[package]]
 name = "shaayi-m0-spike"
 version = "0.0.1"
 dependencies = [
@@ -3256,6 +3260,7 @@ dependencies = [
  "qrcode",
  "serde",
  "serde_json",
+ "shaayi-input",
  "tauri",
  "tauri-build",
  "tokio",
