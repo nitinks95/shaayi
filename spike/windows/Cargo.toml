@@ -8,6 +8,7 @@ description = "Shaayi M0 spike wrapped in Tauri"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+shaayi-input = { path = "../../shaayi-input" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
 local-ip-address = "0.6.13"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }

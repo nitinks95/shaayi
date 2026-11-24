@@ -5,6 +5,8 @@ use tauri::Manager;
 use tauri::State;
 
 #[cfg(target_os = "windows")]
+mod pointer_win;
+#[cfg(target_os = "windows")]
 mod windows_input;
 mod phone_trackpad;
 
@@ -35,6 +37,24 @@ fn get_input_status() -> String {
     { "Native input probe is Windows-only.".into() }
 }
 
+/// "Precision Touchpad active" or "No Precision Touchpad found; native trackpad input is off".
+#[tauri::command]
+fn native_status() -> String {
+    #[cfg(target_os = "windows")]
+    { return windows_input::native_status(); }
+    #[cfg(not(target_os = "windows"))]
+    { "No Precision Touchpad found; native trackpad input is off".into() }
+}
+
+/// Place the edit box (canvas pixels); it is clamped inside the canvas.
+#[tauri::command]
+fn set_edit_box(anchor_x: f64, anchor_y: f64, width: f64, canvas_w: f64, canvas_h: f64) {
+    #[cfg(target_os = "windows")]
+    windows_input::set_edit_box(anchor_x, anchor_y, width, canvas_w, canvas_h);
+    #[cfg(not(target_os = "windows"))]
+    let _ = (anchor_x, anchor_y, width, canvas_w, canvas_h);
+}
+
 #[tauri::command]
 fn get_phone_pairing(state: State<'_, phone_trackpad::PhoneTrackpadServer>) -> Result<phone_trackpad::PairingInfo, String> {
     state.pairing_info()
@@ -54,7 +74,7 @@ fn main() {
             app.manage(phone_server);
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![set_edit_mode, get_input_status, get_phone_pairing, stop_phone_sharing])
+        .invoke_handler(tauri::generate_handler![set_edit_mode, get_input_status, native_status, set_edit_box, get_phone_pairing, stop_phone_sharing])
         .on_window_event(|_window, event| {
             #[cfg(target_os = "windows")]
             if matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }) {

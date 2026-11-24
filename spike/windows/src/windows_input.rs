@@ -1,6 +1,7 @@
-//! Throwaway Windows M0 input probe. Captures the Precision Touchpad HID TLC
-//! as raw reports; report decoding is intentionally left visible in the HUD
-//! until it can be matched to a real device descriptor.
+//! Windows Precision Touchpad adapter. Captures the Precision Touchpad HID TLC
+//! as raw reports, decodes them with the device descriptor, and feeds shared
+//! `ContactEvent`s (source: Trackpad) through `GestureMachine`. The resulting
+//! `InkOp`s are mapped into the edit box and emitted as the `ink-ops` event.
 
 use std::{
     collections::HashMap,
@@ -9,8 +10,14 @@ use std::{
     ptr,
     sync::{mpsc, Mutex, OnceLock},
     thread,
+    time::Instant,
 };
 
+use shaayi_input::{
+    pointer_lock::PointerLock, ContactEvent, EditBox, GestureMachine, InkOp, Phase, Source,
+};
+
+use crate::pointer_win::ClipBackend;
 use tauri::{AppHandle, Emitter};
 use windows_sys::Win32::{
     Devices::HumanInterfaceDevice::{
@@ -32,7 +39,10 @@ const HID_USAGE_DIGITIZER_TOUCHPAD: u16 = 0x05;
 const CLASS_NAME: &[u16] = &[83, 104, 97, 97, 121, 105, 82, 97, 119, 73, 110, 112, 117, 116, 0];
 
 static REPORTS: OnceLock<mpsc::Sender<serde_json::Value>> = OnceLock::new();
-static EDIT_MODE: OnceLock<std::sync::Mutex<bool>> = OnceLock::new();
+static POINTER: OnceLock<Mutex<PointerLock<ClipBackend>>> = OnceLock::new();
+static GESTURES: OnceLock<Mutex<GestureMachine>> = OnceLock::new();
+static EDIT_BOX: OnceLock<Mutex<EditBox>> = OnceLock::new();
+static START: OnceLock<Instant> = OnceLock::new();
 static STATUS: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
 static ACTIVE_CONTACTS: OnceLock<Mutex<HashMap<usize, HashMap<u32, (f64, f64)>>>> = OnceLock::new();
 
@@ -78,14 +88,6 @@ struct Message {
     private: u32,
 }
 
-#[repr(C)]
-struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
 #[link(name = "user32")]
 extern "system" {
     fn RegisterClassW(class: *const WindowClass) -> u16;
@@ -109,8 +111,6 @@ extern "system" {
     fn GetMessageW(message: *mut Message, window: Handle, min: u32, max: u32) -> i32;
     fn TranslateMessage(message: *const Message) -> i32;
     fn DispatchMessageW(message: *const Message) -> isize;
-    fn GetCursorPos(point: *mut Point) -> i32;
-    fn ClipCursor(rect: *const Rect) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -119,16 +119,10 @@ extern "system" {
     fn GetLastError() -> u32;
 }
 
-#[repr(C)]
-struct Point {
-    x: i32,
-    y: i32,
-}
-
 pub fn start(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel::<serde_json::Value>();
     REPORTS.set(tx).map_err(|_| std::io::Error::new(std::io::ErrorKind::AlreadyExists, "Raw input channel already initialized"))?;
-    EDIT_MODE.set(std::sync::Mutex::new(false)).ok();
+    START.get_or_init(Instant::now);
     STATUS.set(std::sync::Mutex::new("Initializing raw input…".into())).ok();
 
     thread::Builder::new()
@@ -139,8 +133,8 @@ pub fn start(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .name("shaayi-input-events".into())
         .spawn(move || {
             for payload in rx {
-                if let Some(contact) = payload.get("native-touchpad-input") {
-                    let _ = app.emit("native-touchpad-input", contact.clone());
+                if let Some(ops) = payload.get("ink-ops") {
+                    let _ = app.emit("ink-ops", ops.clone());
                 } else {
                     let _ = app.emit("touchpad-report", payload);
                 }
@@ -148,8 +142,43 @@ pub fn start(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     // Clear a stale cursor clip from a previous force-terminated run.
-    unsafe { ClipCursor(ptr::null()) };
+    pointer().lock().map_err(|_| "Pointer lock is unavailable")?.startup_recover()?;
     Ok(())
+}
+
+fn pointer() -> &'static Mutex<PointerLock<ClipBackend>> {
+    POINTER.get_or_init(|| Mutex::new(PointerLock::new(ClipBackend)))
+}
+
+fn gestures() -> &'static Mutex<GestureMachine> {
+    GESTURES.get_or_init(|| Mutex::new(GestureMachine::new()))
+}
+
+fn edit_box() -> &'static Mutex<EditBox> {
+    EDIT_BOX.get_or_init(|| Mutex::new(EditBox { anchor: (0.0, 0.0), width: 0.0 }))
+}
+
+/// Place the edit box (canvas pixels) and clamp it inside the canvas.
+pub fn set_edit_box(anchor_x: f64, anchor_y: f64, width: f64, canvas_w: f64, canvas_h: f64) {
+    if let Ok(mut b) = edit_box().lock() {
+        *b = EditBox { anchor: (anchor_x, anchor_y), width };
+        b.clamp_to(canvas_w, canvas_h);
+    }
+}
+
+pub fn native_status() -> String {
+    if has_precision_touchpad() {
+        "Precision Touchpad active".into()
+    } else {
+        "No Precision Touchpad found; native trackpad input is off".into()
+    }
+}
+
+/// Normalise a raw HID value to 0-1, origin top-left. The ASUS ELAN pad
+/// already reports Y top-down; flipping it inverted vertical motion (see
+/// PRODUCT.md, 2026-11-24 validation), so Y is passed through unflipped.
+fn normalise(x: i32, y: i32, max_x: i32, max_y: i32) -> (f64, f64) {
+    (x as f64 / max_x as f64, y as f64 / max_y as f64)
 }
 
 pub fn status() -> String {
@@ -159,27 +188,16 @@ pub fn status() -> String {
 }
 
 pub fn set_edit_mode(enabled: bool) -> Result<(), String> {
-    let mode = EDIT_MODE.get_or_init(|| std::sync::Mutex::new(false));
-    let mut current = mode.lock().map_err(|_| "Edit mode state is unavailable")?;
-    if *current == enabled {
-        return Ok(());
-    }
-
+    let mut lock = pointer().lock().map_err(|_| "Pointer lock is unavailable")?;
     if enabled {
-        let mut point = Point { x: 0, y: 0 };
-        if unsafe { GetCursorPos(&mut point) } == 0 {
-            return Err(format!("GetCursorPos failed: {}", unsafe { GetLastError() }));
+        lock.enter_edit()
+    } else {
+        lock.exit_edit()?;
+        if let Ok(mut g) = gestures().lock() {
+            g.reset();
         }
-        let clip = Rect { left: point.x, top: point.y, right: point.x + 1, bottom: point.y + 1 };
-        if unsafe { ClipCursor(&clip) } == 0 {
-            return Err(format!("ClipCursor failed: {}", unsafe { GetLastError() }));
-        }
-    } else if unsafe { ClipCursor(ptr::null()) } == 0 {
-        return Err(format!("Releasing ClipCursor failed: {}", unsafe { GetLastError() }));
+        Ok(())
     }
-
-    *current = enabled;
-    Ok(())
 }
 
 fn input_window_thread() {
@@ -297,6 +315,9 @@ struct DecodedContact {
     y: f64,
 }
 
+/// Raw logical value (offset to zero) and logical span for one usage.
+type Raw = (i32, i32);
+
 fn decode_touchpad_report(device: Handle, report: &[u8]) -> Option<Vec<DecodedContact>> {
     unsafe {
         let mut preparsed_size = 0u32;
@@ -338,9 +359,10 @@ fn decode_touchpad_report(device: Handle, report: &[u8]) -> Option<Vec<DecodedCo
             }
 
             let Some(id) = usage_value(preparsed_data, report, link, 0x0D, 0x51) else { continue; };
-            let Some(x) = normalized_usage(preparsed_data, report, link, 0x01, 0x30) else { continue; };
-            let Some(y) = normalized_usage(preparsed_data, report, link, 0x01, 0x31) else { continue; };
-            contacts.push(DecodedContact { id, x, y });
+            let Some((rx, max_x)) = raw_usage(preparsed_data, report, link, 0x01, 0x30) else { continue; };
+            let Some((ry, max_y)) = raw_usage(preparsed_data, report, link, 0x01, 0x31) else { continue; };
+            let (x, y) = normalise(rx, ry, max_x, max_y);
+            contacts.push(DecodedContact { id, x: x.clamp(0.0, 1.0), y: y.clamp(0.0, 1.0) });
         }
         Some(contacts)
     }
@@ -352,14 +374,14 @@ unsafe fn usage_value(preparsed: isize, report: &[u8], link: u16, page: u16, usa
     (status == HIDP_STATUS_SUCCESS).then_some(value)
 }
 
-unsafe fn normalized_usage(preparsed: isize, report: &[u8], link: u16, page: u16, usage: u16) -> Option<f64> {
+unsafe fn raw_usage(preparsed: isize, report: &[u8], link: u16, page: u16, usage: u16) -> Option<Raw> {
     let mut caps = HIDP_VALUE_CAPS::default();
     let mut cap_count = 1u16;
     let status = unsafe { HidP_GetSpecificValueCaps(HidP_Input, page, link, usage, &mut caps, &mut cap_count, preparsed) };
     if status != HIDP_STATUS_SUCCESS || cap_count == 0 || caps.LogicalMax <= caps.LogicalMin { return None; }
     let value = unsafe { usage_value(preparsed, report, link, page, usage)? } as i64;
-    let range = (caps.LogicalMax as i64) - (caps.LogicalMin as i64);
-    Some(((value - caps.LogicalMin as i64) as f64 / range as f64).clamp(0.0, 1.0))
+    let span = (caps.LogicalMax as i64) - (caps.LogicalMin as i64);
+    Some(((value - caps.LogicalMin as i64) as i32, span as i32))
 }
 
 fn emit_contact_changes(device: usize, current: Vec<DecodedContact>) {
@@ -368,21 +390,45 @@ fn emit_contact_changes(device: usize, current: Vec<DecodedContact>) {
     let previous = devices.entry(device).or_default();
     let mut next = HashMap::new();
     for contact in current {
-        let phase = if previous.contains_key(&contact.id) { "move" } else { "down" };
+        let phase = if previous.contains_key(&contact.id) { Phase::Move } else { Phase::Down };
         next.insert(contact.id, (contact.x, contact.y));
-        emit_native_contact(phase, contact.id, contact.x, contact.y);
+        handle_contact(contact.id, phase, contact.x, contact.y);
     }
     for (id, (x, y)) in previous.iter() {
-        if !next.contains_key(id) { emit_native_contact("up", *id, *x, *y); }
+        if !next.contains_key(id) { handle_contact(*id, Phase::Up, *x, *y); }
     }
     *previous = next;
 }
 
-fn emit_native_contact(phase: &str, id: u32, x: f64, y: f64) {
+/// The only path from a touchpad contact to ink: through `GestureMachine`.
+fn handle_contact(id: u32, phase: Phase, x: f64, y: f64) {
+    // Contacts only draw while edit mode holds the pointer.
+    if !pointer().lock().map(|p| p.is_detached()).unwrap_or(false) { return; }
+    let at_ms = START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0;
+    let event = ContactEvent { source: Source::Trackpad, id: id as u64, phase, x, y, at_ms };
+    let ops = match gestures().lock() {
+        Ok(mut g) => g.handle(event),
+        Err(_) => return,
+    };
+    if ops.is_empty() { return; }
+    let Ok(edit) = edit_box().lock().map(|b| *b) else { return; };
+    let json: Vec<serde_json::Value> = ops.iter().map(|op| ink_op_json(op, &edit)).collect();
     if let Some(tx) = REPORTS.get() {
-        let _ = tx.send(serde_json::json!({
-            "native-touchpad-input": { "phase": phase, "id": id + 1_000_000, "x": x, "y": y }
-        }));
+        let _ = tx.send(serde_json::json!({ "ink-ops": json }));
+    }
+}
+
+fn ink_op_json(op: &InkOp, edit: &EditBox) -> serde_json::Value {
+    match op {
+        InkOp::Segment { from, to } => {
+            let (f, t) = (edit.map(from.0, from.1), edit.map(to.0, to.1));
+            serde_json::json!({ "op": "segment", "from": [f.0, f.1], "to": [t.0, t.1] })
+        }
+        InkOp::Dot { at } => {
+            let a = edit.map(at.0, at.1);
+            serde_json::json!({ "op": "dot", "at": [a.0, a.1] })
+        }
+        InkOp::Rollback { segments } => serde_json::json!({ "op": "rollback", "segments": segments }),
     }
 }
 
@@ -453,5 +499,16 @@ fn send_status(status: String) {
     }
     if let Some(tx) = REPORTS.get() {
         let _ = tx.send(serde_json::json!({ "status": status }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalise;
+
+    #[test]
+    fn logical_range_normalises_to_unit_square() {
+        assert_eq!(normalise(0, 0, 4095, 2499), (0.0, 0.0));
+        assert_eq!(normalise(4095, 2499, 4095, 2499), (1.0, 1.0));
     }
 }
