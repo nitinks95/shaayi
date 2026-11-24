@@ -43,15 +43,12 @@
     <div><b>Shaayi M0 spike</b></div>
     <section id="phone-panel">
       <div><b>Phone trackpad:</b> <span id="phone-status">Starting local pairing…</span></div>
-      <div>Active contacts: <span id="phone-contact-count">0</span></div>
       <img id="phone-qr" alt="QR code to pair your phone" hidden />
       <a id="phone-url" hidden></a>
       <button id="stop-phone">Stop sharing</button>
     </section>
-    <div>Windows input: <span id="native-status">Starting native capture…</span></div>
-    <div>Raw HID reports: <span id="raw-count">0</span></div>
-    <div>Decoded Windows contacts: <span id="native-contact-count">0</span></div>
-    <div class="muted" id="raw-sample">No reports received</div>
+    <div>Source: Trackpad | Phone</div>
+    <div>Native input: <span id="native-status">Starting native capture…</span><span id="mouse-note"></span></div>
     <div>Mode: <span id="mode">VIEW (Ctrl+E to enter edit)</span></div>
     <div>Phone event→frame: <span id="bridge-lat">–</span> ms · avg <span id="bridge-avg">–</span> · p95 <span id="bridge-p95">–</span></div>
     <div class="muted">Raw reports and decoded Windows contacts are shown separately.</div>

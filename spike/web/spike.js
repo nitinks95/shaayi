@@ -4,19 +4,16 @@
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const el = (id) => document.getElementById(id);
-const strokes = [];
-const dots = [];
+// Every drawn item, in order: { kind:'segment', a, b, width, session } or
+// { kind:'dot', x, y, radius }. Only applyInkOp adds to or removes from it.
+const ink = [];
+let inkSession = 0; // bumped on every edit-mode change; rollback only touches the current session
 
 function redrawInk() {
   ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
-  for (const item of strokes) {
-    for (const segment of item.segments) renderSegment(segment.a, segment.b, segment.width);
-  }
-  ctx.fillStyle = INK();
-  for (const dot of dots) {
-    ctx.beginPath();
-    ctx.arc(dot.x, dot.y, dot.radius, 0, Math.PI * 2);
-    ctx.fill();
+  for (const item of ink) {
+    if (item.kind === 'segment') renderSegment(item.a, item.b, item.width);
+    else renderDot(item.x, item.y, item.radius);
   }
 }
 
@@ -37,7 +34,7 @@ const samples = [];
 let pendingInputTimes = [];
 let strokeCount = 0;
 let editMode = false;
-let reportCount = 0;
+let mouseFallback = false; // true only when native status says no Precision Touchpad
 let pointerPosition = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
 const bridgeSamples = [];
 let pendingBridgeTimes = [];
@@ -92,24 +89,10 @@ function frameLoop(now) {
 }
 requestAnimationFrame(frameLoop);
 
-// ---- Drawing -----------------------------------------------------------
-let drawing = false;
-let stroke = null; // { points: [{x,y,p}], color, width }
-const phoneTouches = new Map();
-const nativeTouches = new Set();
-let phoneStroke = null;
-let phoneGesture = false;
-let phoneStrokeStartedAt = 0;
-const INK = () => getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#111';
 
-function widthFor(pressure, pointerType) {
-  // Trackpads often report pressure 0.5 or 0 when not force-touch,
-  // so fall back to a fixed width in that case.
-  if (pointerType === 'pen' || (pressure > 0 && pressure !== 0.5)) {
-    return 1.5 + pressure * 4;
-  }
-  return 2.5;
-}
+// ---- Drawing: one entry point -------------------------------------------
+const INK = () => getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#111';
+const SEGMENT_WIDTH = 2.5;
 resize();
 
 function renderSegment(a, b, width) {
@@ -125,73 +108,89 @@ function renderSegment(a, b, width) {
   ctx.stroke();
 }
 
-function drawSegment(a, b, width, target) {
-  target.segments.push({ a: { x: a.x, y: a.y }, b: { x: b.x, y: b.y }, width });
-  renderSegment(a, b, width);
-}
-
-function addDot(point, radius = 3) {
-  dots.push({ x: point.x, y: point.y, radius });
+function renderDot(x, y, radius) {
   ctx.fillStyle = INK();
   ctx.beginPath();
-  ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
   ctx.fill();
 }
 
-canvas.addEventListener('pointerdown', (e) => {
-  if (editMode) {
-    // Until contact coordinates are decoded, the click is represented at the
-    // anchored centre of the edit box.
-    const rect = el('edit-box').getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-    addDot({ x: rect.left + rect.width / 2 - canvasRect.left, y: rect.top + rect.height / 2 - canvasRect.top });
+function isPoint(p) {
+  return Array.isArray(p) && p.length === 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]);
+}
+
+// The only place canvas ink is drawn or removed. Ops arrive from the Rust side
+// as { op: 'segment', from: [x,y], to: [x,y] }, { op: 'dot', at: [x,y] } or
+// { op: 'rollback', segments: n }, with coordinates already in canvas pixels.
+function applyInkOp(op) {
+  if (!op || !editMode) return; // second safety net behind the Rust-side gating
+  if (op.op === 'segment') {
+    if (!isPoint(op.from) || !isPoint(op.to)) return;
+    const a = { x: op.from[0], y: op.from[1] }, b = { x: op.to[0], y: op.to[1] };
+    ink.push({ kind: 'segment', a, b, width: SEGMENT_WIDTH, session: inkSession });
+    renderSegment(a, b, SEGMENT_WIDTH);
+  } else if (op.op === 'dot') {
+    if (!isPoint(op.at)) return;
+    ink.push({ kind: 'dot', x: op.at[0], y: op.at[1], radius: 3 });
+    renderDot(op.at[0], op.at[1], 3);
+  } else if (op.op === 'rollback') {
+    let remaining = Math.max(0, Math.floor(Number(op.segments) || 0));
+    for (let i = ink.length - 1; i >= 0 && remaining > 0; i--) {
+      if (ink[i].kind === 'segment' && ink[i].session === inkSession) {
+        ink.splice(i, 1);
+        remaining--;
+      }
+    }
+    redrawInk();
+  } else {
     return;
   }
-  if (e.button !== 0) return;
-  canvas.setPointerCapture(e.pointerId);
-  drawing = true;
-  stroke = { points: [], segments: [], source: 'pointer' };
-  strokes.push(stroke);
-  strokeCount++;
+  strokeCount = ink.length;
   el('strokes').textContent = strokeCount;
-  addPoint(e);
-});
-
-canvas.addEventListener('pointermove', (e) => {
-  if (!drawing) return;
-  // getCoalescedEvents gives every sample the OS delivered this frame,
-  // which is what makes trackpad/pen strokes look smooth.
-  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-  for (const ev of (events.length ? events : [e])) addPoint(ev);
-});
-
-function endStroke(e) {
-  if (!drawing) return;
-  drawing = false;
-  stroke = null;
 }
-canvas.addEventListener('pointerup', endStroke);
-canvas.addEventListener('pointercancel', endStroke);
 
-function addPoint(e) {
+function applyInkOps(payload) {
+  const receivedAt = performance.now();
+  const ops = Array.isArray(payload) ? payload : [payload];
+  for (const op of ops) applyInkOp(op);
+  pendingBridgeTimes.push(receivedAt);
+}
+
+// ---- Mouse fallback ------------------------------------------------------
+// Only active in edit mode and only when there is no Precision Touchpad.
+// It feeds the same applyInkOp as every other source.
+let mouseLast = null;
+let mouseMoved = false;
+function mousePoint(e) {
   const rect = canvas.getBoundingClientRect();
-  const p = { x: e.clientX - rect.left, y: e.clientY - rect.top, pr: e.pressure };
-  el('pr').textContent = e.pressure.toFixed(2);
-  el('pt').textContent = e.pointerType || 'unknown';
-
-  const prev = stroke.points[stroke.points.length - 1];
-  stroke.points.push(p);
-  if (prev) {
-    const w = widthFor(p.pr, e.pointerType);
-    drawSegment(prev, p, w, stroke);
-  }
-  // Record when this input happened so the next frame can compute latency.
-  pendingInputTimes.push(e.timeStamp);
+  return [e.clientX - rect.left, e.clientY - rect.top];
 }
+canvas.addEventListener('pointerdown', (e) => {
+  if (!mouseFallback || !editMode || e.button !== 0) return;
+  canvas.setPointerCapture(e.pointerId);
+  mouseLast = mousePoint(e);
+  mouseMoved = false;
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!mouseLast) return;
+  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for (const ev of (events.length ? events : [e])) {
+    const next = mousePoint(ev);
+    applyInkOp({ op: 'segment', from: mouseLast, to: next });
+    mouseLast = next;
+    mouseMoved = true;
+    pendingInputTimes.push(ev.timeStamp);
+  }
+});
+function endMouse() {
+  if (mouseLast && !mouseMoved) applyInkOp({ op: 'dot', at: mouseLast });
+  mouseLast = null;
+}
+canvas.addEventListener('pointerup', endMouse);
+canvas.addEventListener('pointercancel', endMouse);
 
 el('clear').addEventListener('click', () => {
-  strokes.length = 0;
-  dots.length = 0;
+  ink.length = 0;
   redrawInk();
   samples.length = 0;
   strokeCount = 0;
@@ -199,126 +198,19 @@ el('clear').addEventListener('click', () => {
   updateStats();
 });
 
-function mapPhonePoint(x, y) {
-  const box = el('edit-box').getBoundingClientRect();
-  const canvasRect = canvas.getBoundingClientRect();
-  return { x: box.left + x * box.width - canvasRect.left, y: box.top + y * box.height - canvasRect.top };
-}
-
-function updatePhoneContactCount() {
-  el('phone-contact-count').textContent = phoneTouches.size;
-}
-
-function phoneInput(input) {
-  const id = Number(input.id);
-  if (!Number.isSafeInteger(id)) return;
-  const point = mapPhonePoint(input.x, input.y);
-  const phase = input.phase;
-
-  if (phase === 'down') {
-    if (!editMode) return;
-    phoneTouches.set(id, point);
-    updatePhoneContactCount();
-    if (phoneTouches.size === 1) {
-      phoneGesture = false;
-      phoneStrokeStartedAt = performance.now();
-      phoneStroke = { points: [point], segments: [], source: 'phone', tentative: true };
-      strokes.push(phoneStroke);
-      strokeCount++;
-      el('strokes').textContent = strokeCount;
-    } else {
-      phoneGesture = true;
-      if (phoneTouches.size === 2) {
-        if (performance.now() - phoneStrokeStartedAt <= 150 && phoneStroke) {
-          const index = strokes.indexOf(phoneStroke);
-          if (index >= 0) strokes.splice(index, 1);
-          strokeCount = Math.max(0, strokeCount - 1);
-          el('strokes').textContent = strokeCount;
-          redrawInk();
-        } else if (phoneStroke && phoneStroke.segments.length === 0) {
-          const index = strokes.indexOf(phoneStroke);
-          if (index >= 0) {
-            strokes.splice(index, 1);
-            strokeCount = Math.max(0, strokeCount - 1);
-            el('strokes').textContent = strokeCount;
-            redrawInk();
-          }
-        }
-        phoneStroke = null;
-      }
-    }
-    return;
-  }
-
-  if (!phoneTouches.has(id)) return;
-  if (phase === 'move') {
-    phoneTouches.set(id, point);
-    if (phoneGesture || phoneTouches.size !== 1 || !phoneStroke) return;
-    const previous = phoneStroke.points[phoneStroke.points.length - 1];
-    phoneStroke.points.push(point);
-    drawSegment(previous, point, 2.5, phoneStroke);
-    pendingBridgeTimes.push(performance.now());
-    return;
-  }
-
-  if (phase === 'up' || phase === 'cancel') {
-    phoneTouches.set(id, point);
-    const wasSingleTap = phase === 'up' && !phoneGesture && phoneTouches.size === 1
-      && phoneStroke && phoneStroke.segments.length === 0;
-    if (wasSingleTap) {
-      const index = strokes.indexOf(phoneStroke);
-      if (index >= 0) strokes.splice(index, 1);
-      strokeCount = Math.max(0, strokeCount - 1);
-      el('strokes').textContent = strokeCount;
-      addDot(point);
-    } else if (phoneStroke && phase === 'cancel' && phoneStroke.segments.length === 0) {
-      const index = strokes.indexOf(phoneStroke);
-      if (index >= 0) {
-        strokes.splice(index, 1);
-        strokeCount = Math.max(0, strokeCount - 1);
-        el('strokes').textContent = strokeCount;
-        redrawInk();
-      }
-    } else if (phoneStroke) {
-      phoneStroke.tentative = false;
-    }
-    phoneTouches.delete(id);
-    updatePhoneContactCount();
-    if (phoneTouches.size === 0) {
-      phoneStroke = null;
-      phoneGesture = false;
-    }
-  }
-}
-
-function clearPhoneContacts() {
-  if (phoneStroke && phoneStroke.segments.length === 0) {
-    const index = strokes.indexOf(phoneStroke);
-    if (index >= 0) {
-      strokes.splice(index, 1);
-      strokeCount = Math.max(0, strokeCount - 1);
-      el('strokes').textContent = strokeCount;
-      redrawInk();
-    }
-  } else if (phoneStroke) {
-    phoneStroke.tentative = false;
-  }
-  phoneTouches.clear();
-  updatePhoneContactCount();
-  phoneStroke = null;
-  phoneGesture = false;
-}
-
 function setEditMode(enabled) {
-  if (!enabled) {
-    clearPhoneContacts();
-    nativeTouches.clear();
-    el('native-contact-count').textContent = '0';
-  }
+  mouseLast = null;
+  inkSession++; // a new session: rollback never reaches into an earlier one
   editMode = enabled;
   document.body.classList.toggle('editing', enabled);
   el('mode').textContent = enabled ? 'EDIT (pointer clipped, Ctrl+E to exit)' : 'VIEW (Ctrl+E to enter edit)';
   positionEditBox();
+}
+
+function setNativeStatus(text) {
+  el('native-status').textContent = text;
+  mouseFallback = String(text).includes('No Precision Touchpad found');
+  el('mouse-note').textContent = mouseFallback ? ' (mouse fallback on)' : '';
 }
 
 function positionEditBox() {
@@ -349,43 +241,18 @@ document.addEventListener('keydown', async (event) => {
   }
 }, true);
 
+
 if (window.__TAURI__ && window.__TAURI__.event) {
   window.__TAURI__.event.listen('touchpad-report', (event) => {
-    const payload = event.payload;
-    if (payload.status) {
-      el('native-status').textContent = payload.status;
-      return;
-    }
-    reportCount += payload.reports.length;
-    el('raw-count').textContent = reportCount;
-    el('raw-sample').textContent = `device ${payload.device} · ${payload.reportSize} bytes · ${payload.reports[0]}`;
-    pendingBridgeTimes.push(performance.now());
+    if (event.payload && event.payload.status) setNativeStatus(event.payload.status);
   });
   window.__TAURI__.event.listen('edit-mode-changed', (event) => setEditMode(Boolean(event.payload)));
-  window.__TAURI__.event.listen('phone-input', (event) => {
-    const receivedAt = performance.now();
-    phoneInput(event.payload);
-    pendingBridgeTimes.push(receivedAt);
-  });
-  window.__TAURI__.event.listen('native-touchpad-input', (event) => {
-    const receivedAt = performance.now();
-    const contact = event.payload;
-    if (contact.phase === 'down' || contact.phase === 'move') nativeTouches.add(Number(contact.id));
-    if (contact.phase === 'up' || contact.phase === 'cancel') nativeTouches.delete(Number(contact.id));
-    el('native-contact-count').textContent = nativeTouches.size;
-    phoneInput(contact);
-    pendingInputTimes.push(receivedAt);
-  });
-  window.__TAURI__.event.listen('phone-input-cleared', clearPhoneContacts);
+  window.__TAURI__.event.listen('ink-ops', (event) => applyInkOps(event.payload));
   window.__TAURI__.event.listen('phone-status', (event) => {
-    const status = event.payload;
-    el('phone-status').textContent = status.message;
-    if (!status.connected) clearPhoneContacts();
+    el('phone-status').textContent = event.payload.message;
   });
-  window.__TAURI__.core.invoke('get_input_status').then((status) => {
-    el('native-status').textContent = status;
-  }).catch((error) => {
-    el('native-status').textContent = String(error);
+  window.__TAURI__.core.invoke('get_input_status').then(setNativeStatus).catch((error) => {
+    setNativeStatus(String(error));
   });
   window.__TAURI__.core.invoke('get_phone_pairing').then((pairing) => {
     el('phone-status').textContent = pairing.status;
@@ -399,7 +266,7 @@ if (window.__TAURI__ && window.__TAURI__.event) {
     el('phone-status').textContent = String(error);
   });
 } else {
-  el('native-status').textContent = 'Open this page in the Tauri Windows shell';
+  setNativeStatus('Open this page in the Tauri shell');
 }
 
 el('stop-phone').addEventListener('click', async () => {
@@ -409,7 +276,6 @@ el('stop-phone').addEventListener('click', async () => {
     el('phone-qr').hidden = true;
     el('phone-url').hidden = true;
     el('stop-phone').disabled = true;
-    clearPhoneContacts();
   } catch (error) {
     el('phone-status').textContent = String(error);
   }
