@@ -1,0 +1,19 @@
+[package]
+name = "shaayi-m0-spike"
+version = "0.0.1"
+edition = "2021"
+description = "Shaayi M0 spike wrapped in Tauri"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
+local-ip-address = "0.6.13"
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["net", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Devices_HumanInterfaceDevice", "Win32_UI_Input"] }

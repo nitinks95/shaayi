@@ -1,0 +1,13 @@
+{
+  "name": "shaayi-m0-spike-electron",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Shaayi M0 spike wrapped in Electron",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
