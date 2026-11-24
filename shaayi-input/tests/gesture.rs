@@ -80,7 +80,9 @@ fn tap_down_up_same_point_emits_dot() {
 fn sub_slop_moves_accumulate_into_a_segment() {
     let mut g = GestureMachine::new();
     g.handle(ev(1, Phase::Down, 0.5, 0.5, 0.0));
-    assert!(g.handle(ev(1, Phase::Move, 0.5003, 0.5, 8.0)).is_empty());
-    let ops = g.handle(ev(1, Phase::Move, 0.5006, 0.5, 16.0));
-    assert_eq!(ops, vec![InkOp::Segment { from: (0.5, 0.5), to: (0.5006, 0.5) }]);
+    // Sub-slop wobble from the Down point draws nothing.
+    assert!(g.handle(ev(1, Phase::Move, 0.502, 0.5, 8.0)).is_empty());
+    // Once the contact leaves the slop radius, one segment from the Down point is drawn.
+    let ops = g.handle(ev(1, Phase::Move, 0.504, 0.5, 16.0));
+    assert_eq!(ops, vec![InkOp::Segment { from: (0.5, 0.5), to: (0.504, 0.5) }]);
 }
