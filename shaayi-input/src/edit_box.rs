@@ -22,10 +22,19 @@ impl EditBox {
     /// Move the anchor so the whole box fits in the canvas; shrink width first
     /// if the box is larger than the canvas.
     pub fn clamp_to(&mut self, canvas_w: f64, canvas_h: f64) {
+        if !canvas_w.is_finite() || !canvas_h.is_finite() {
+            return;
+        }
+        if canvas_w <= 0.0 || canvas_h <= 0.0 {
+            // Zero-size canvas: pin the anchor to the origin, leave width alone.
+            self.anchor = (0.0, 0.0);
+            return;
+        }
         self.width = self.width.min(canvas_w).min(canvas_h * ASPECT);
         let (hw, hh) = (self.width / 2.0, self.height() / 2.0);
-        self.anchor.0 = self.anchor.0.clamp(hw, canvas_w - hw);
-        self.anchor.1 = self.anchor.1.clamp(hh, canvas_h - hh);
+        // max/min chains (not f64::clamp) so this can never panic.
+        self.anchor.0 = self.anchor.0.max(hw).min(canvas_w - hw);
+        self.anchor.1 = self.anchor.1.max(hh).min(canvas_h - hh);
     }
 
     /// Linear map from normalised (0-1, y down) to canvas pixels.
