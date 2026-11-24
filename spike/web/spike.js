@@ -101,10 +101,11 @@ function renderSegment(a, b, width) {
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
   ctx.beginPath();
-  // Smooth with a midpoint quadratic curve.
+  // Draw the whole segment, a to b: curve to the midpoint, then on to b.
   const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
   ctx.moveTo(a.x, a.y);
   ctx.quadraticCurveTo(a.x, a.y, mx, my);
+  ctx.lineTo(b.x, b.y);
   ctx.stroke();
 }
 
@@ -213,6 +214,8 @@ function setNativeStatus(text) {
   el('mouse-note').textContent = mouseFallback ? ' (mouse fallback on)' : '';
 }
 
+// Places the on-screen box and tells Rust where it is, so native and phone
+// ink map into it. Rust drops all contacts until this has run (box width 0).
 function positionEditBox() {
   const box = el('edit-box');
   const width = Math.min(320, window.innerWidth * 0.6);
@@ -221,6 +224,10 @@ function positionEditBox() {
   const y = Math.max(height / 2 + 8, Math.min(window.innerHeight - height / 2 - 8, pointerPosition.y));
   box.style.left = `${x}px`;
   box.style.top = `${y}px`;
+  if (!window.__TAURI__ || !window.__TAURI__.core) return Promise.resolve();
+  return window.__TAURI__.core.invoke('set_edit_box', {
+    anchorX: x, anchorY: y, width, canvasW: window.innerWidth, canvasH: window.innerHeight,
+  }).catch((error) => { el('native-status').textContent = String(error); });
 }
 window.addEventListener('resize', positionEditBox);
 positionEditBox();
@@ -229,6 +236,8 @@ document.addEventListener('keydown', async (event) => {
   if (event.ctrlKey && event.key.toLowerCase() === 'e') {
     event.preventDefault();
     try {
+      // The box must be placed in Rust before any edit-mode contact is mapped.
+      if (!editMode) await positionEditBox();
       await window.__TAURI__.core.invoke('set_edit_mode', { enabled: !editMode });
     } catch (error) {
       el('native-status').textContent = String(error);
