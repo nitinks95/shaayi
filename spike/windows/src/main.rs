@@ -6,6 +6,10 @@ use tauri::State;
 
 #[cfg(target_os = "windows")]
 mod pointer_win;
+#[cfg(target_os = "macos")]
+mod macos_input;
+#[cfg(target_os = "macos")]
+mod pointer_mac;
 #[cfg(target_os = "windows")]
 mod windows_input;
 mod phone_trackpad;
@@ -21,10 +25,19 @@ fn set_edit_mode(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
         let _ = app.emit("edit-mode-changed", enabled);
         return Ok(());
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        // macOS: no pointer clipping here. Edit mode is still switched on so the
-        // phone bridge can be tested. Native trackpad input stays Windows-only.
+        // NSView focus and the pointer detach must happen on the main thread.
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || { let _ = tx.send(macos_input::set_edit_mode(enabled)); })
+            .map_err(|e| e.to_string())?;
+        rx.recv().map_err(|e| e.to_string())??;
+        use tauri::Emitter;
+        let _ = app.emit("edit-mode-changed", enabled);
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
         use tauri::Emitter;
         let _ = app.emit("edit-mode-changed", enabled);
         Ok(())
@@ -35,7 +48,9 @@ fn set_edit_mode(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 fn get_input_status() -> String {
     #[cfg(target_os = "windows")]
     { return windows_input::status(); }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    { return macos_input::native_status(); }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     { "Native input probe is Windows-only.".into() }
 }
 
@@ -44,7 +59,9 @@ fn get_input_status() -> String {
 fn native_status() -> String {
     #[cfg(target_os = "windows")]
     { return windows_input::native_status(); }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    { return macos_input::native_status(); }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     { "No Precision Touchpad found; native trackpad input is off".into() }
 }
 
@@ -53,7 +70,9 @@ fn native_status() -> String {
 fn set_edit_box(anchor_x: f64, anchor_y: f64, width: f64, canvas_w: f64, canvas_h: f64) {
     #[cfg(target_os = "windows")]
     windows_input::set_edit_box(anchor_x, anchor_y, width, canvas_w, canvas_h);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    macos_input::set_edit_box(anchor_x, anchor_y, width, canvas_w, canvas_h);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = (anchor_x, anchor_y, width, canvas_w, canvas_h);
 }
 
@@ -72,6 +91,12 @@ fn main() {
         .setup(|app| {
             #[cfg(target_os = "windows")]
             windows_input::start(app.handle().clone())?;
+            #[cfg(target_os = "macos")]
+            {
+                let window = app.get_webview_window("main").ok_or("main window missing")?;
+                let ns = window.ns_window()? as *mut objc2_app_kit::NSWindow;
+                macos_input::start(app.handle().clone(), unsafe { &*ns })?;
+            }
             let phone_server = phone_trackpad::PhoneTrackpadServer::start(app.handle().clone())?;
             app.manage(phone_server);
             Ok(())
@@ -82,6 +107,14 @@ fn main() {
             if matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }) {
                 use tauri::Emitter;
                 match windows_input::set_edit_mode(false) {
+                    Ok(()) => { let _ = _window.app_handle().emit("edit-mode-changed", false); }
+                    Err(e) => eprintln!("Failed to release pointer: {e}"),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::CloseRequested { .. }) {
+                use tauri::Emitter;
+                match macos_input::set_edit_mode(false) {
                     Ok(()) => { let _ = _window.app_handle().emit("edit-mode-changed", false); }
                     Err(e) => eprintln!("Failed to release pointer: {e}"),
                 }
@@ -101,7 +134,11 @@ fn main() {
         if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
             let _ = windows_input::set_edit_mode(false);
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+            macos_input::release_pointer();
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = event;
     });
 }
