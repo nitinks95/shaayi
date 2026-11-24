@@ -159,6 +159,11 @@ fn edit_box() -> &'static Mutex<EditBox> {
     EDIT_BOX.get_or_init(|| Mutex::new(EditBox { anchor: (0.0, 0.0), width: 0.0 }))
 }
 
+/// True while edit mode holds the pointer (ink draws only then).
+pub fn edit_mode_on() -> bool {
+    pointer().lock().map(|p| p.is_detached()).unwrap_or(false)
+}
+
 /// Snapshot of the current edit box, for the phone adapter.
 pub fn current_edit_box() -> Option<EditBox> {
     edit_box().lock().ok().map(|b| *b)
@@ -196,6 +201,7 @@ pub fn set_edit_mode(enabled: bool) -> Result<(), String> {
         if let Ok(mut g) = gestures().lock() {
             g.reset();
         }
+        crate::phone_trackpad::reset_phone_gestures();
         result
     }
 }

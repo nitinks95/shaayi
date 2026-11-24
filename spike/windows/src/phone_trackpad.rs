@@ -35,6 +35,17 @@ use crate::macos_input as native;
 #[cfg(target_os = "windows")]
 use crate::windows_input as native;
 
+static PHONE_GESTURES: std::sync::OnceLock<std::sync::Mutex<GestureMachine>> = std::sync::OnceLock::new();
+
+fn phone_gestures() -> &'static std::sync::Mutex<GestureMachine> {
+    PHONE_GESTURES.get_or_init(|| std::sync::Mutex::new(GestureMachine::new()))
+}
+
+/// Ends any open phone gesture session. Called when edit mode turns off or the phone disconnects.
+pub fn reset_phone_gestures() {
+    if let Ok(mut g) = phone_gestures().lock() { let _ = g.reset(); }
+}
+
 const PHONE_PAGE: &str = include_str!("../../web/phone.html");
 const PHONE_SCRIPT: &str = include_str!("../../web/phone.js");
 const MAX_SOCKET_MESSAGE_BYTES: usize = 1024;
@@ -54,7 +65,6 @@ struct ServerState {
     connected: AtomicBool,
     shutdown: watch::Sender<bool>,
     disconnect: broadcast::Sender<()>,
-    gestures: std::sync::Mutex<GestureMachine>,
     started: Instant,
 }
 
@@ -103,7 +113,6 @@ impl PhoneTrackpadServer {
             connected: AtomicBool::new(false),
             shutdown,
             disconnect,
-            gestures: std::sync::Mutex::new(GestureMachine::new()),
             started: Instant::now(),
         });
 
@@ -304,6 +313,11 @@ impl ServerState {
 
 /// Phone contacts become ink the same way trackpad contacts do: through `GestureMachine`.
 fn route_through_gestures(state: &ServerState, phase: &str, id: u64, x: f64, y: f64) {
+    // Ink only draws in edit mode, for every source.
+    if !edit_mode_on() {
+        reset_phone_gestures();
+        return;
+    }
     let phase = match phase {
         "down" => Phase::Down,
         "move" => Phase::Move,
@@ -311,7 +325,7 @@ fn route_through_gestures(state: &ServerState, phase: &str, id: u64, x: f64, y: 
         _ => Phase::Cancel,
     };
     let event = ContactEvent { source: Source::Phone, id, phase, x, y, at_ms: state.now_ms() };
-    let ops = match state.gestures.lock() {
+    let ops = match phone_gestures().lock() {
         Ok(mut g) => g.handle(event),
         Err(_) => return,
     };
@@ -324,6 +338,11 @@ fn emit_ink_ops(state: &ServerState, ops: &[InkOp]) {
     let json: Vec<serde_json::Value> = ops.iter().map(|op| native_ink_op_json(op, &edit)).collect();
     let _ = state.app.emit("ink-ops", json);
 }
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn edit_mode_on() -> bool { native::edit_mode_on() }
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn edit_mode_on() -> bool { false }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn current_edit_box() -> Option<EditBox> { native::current_edit_box() }
@@ -344,7 +363,7 @@ impl PhoneConnection {
 impl Drop for PhoneConnection {
     fn drop(&mut self) {
         self.0.connected.store(false, Ordering::SeqCst);
-        if let Ok(mut g) = self.0.gestures.lock() { let _ = g.reset(); }
+        reset_phone_gestures();
         let message = if self.0.stopped.load(Ordering::SeqCst) { "Sharing stopped" } else { "Phone disconnected" };
         emit_status(&self.0, false, message);
         let _ = self.0.app.emit("phone-input-cleared", ());

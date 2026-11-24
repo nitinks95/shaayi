@@ -172,6 +172,11 @@ pub fn native_status() -> String {
     "Trackpad (NSTouch) active".into()
 }
 
+/// True while edit mode holds the pointer (ink draws only then).
+pub fn edit_mode_on() -> bool {
+    pointer().lock().map(|p| p.is_detached()).unwrap_or(false)
+}
+
 /// Snapshot of the current edit box, for the phone adapter.
 pub fn current_edit_box() -> Option<EditBox> {
     edit_box().lock().ok().map(|b| *b)
@@ -203,6 +208,7 @@ pub fn set_edit_mode(enabled: bool) -> Result<(), String> {
         if let Ok(mut g) = gestures().lock() {
             g.reset();
         }
+        crate::phone_trackpad::reset_phone_gestures();
         if let Some((view, window)) = overlay_and_window() {
             let prev = view.ivars().previous.lock().ok().and_then(|mut g| g.take());
             window.makeFirstResponder(prev.as_deref());
